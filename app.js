@@ -161,13 +161,22 @@ app.post('/create-order', async (req, res) => {
   let wallet = null;
   let amountDeducted = false;
 
+  let customer;
+  let shipping_address;
+  let cart_items;
+  let total;
+  let email;
+
   try {
-    const {
+    ({
       customer,
       shipping_address,
       cart_items,
       total
-    } = req.body;
+    } = req.body);
+
+    console.log('REQUEST BODY:');
+    console.log(JSON.stringify(req.body, null, 2));
 
     // Validation
     if (!customer?.email) {
@@ -177,7 +186,7 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    if (!cart_items || !Array.isArray(cart_items) || cart_items.length === 0) {
+    if (!Array.isArray(cart_items) || cart_items.length === 0) {
       return res.status(400).json({
         success: false,
         message: 'Cart is empty'
@@ -191,9 +200,9 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    const email = customer.email.toLowerCase().trim();
+    email = customer.email.toLowerCase().trim();
 
-    // Atomic wallet deduction
+    // Deduct wallet balance atomically
     wallet = await Wallet.findOneAndUpdate(
       {
         email,
@@ -210,7 +219,7 @@ app.post('/create-order', async (req, res) => {
     if (!wallet) {
       return res.status(400).json({
         success: false,
-        message: 'Insufficient wallet balance or wallet not found'
+        message: 'Wallet not found or insufficient balance'
       });
     }
 
@@ -237,6 +246,9 @@ app.post('/create-order', async (req, res) => {
       }
     };
 
+    console.log('SHOPIFY PAYLOAD:');
+    console.log(JSON.stringify(shopifyPayload, null, 2));
+
     const response = await fetch(
       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/orders.json`,
       {
@@ -249,14 +261,18 @@ app.post('/create-order', async (req, res) => {
       }
     );
 
-    const data = await response.json().catch(() => ({}));
+    const data = await response.json();
 
-    // Shopify order failed
+    console.log('SHOPIFY RESPONSE:');
+    console.log(JSON.stringify(data, null, 2));
+
     if (!response.ok) {
-
+      // Refund wallet
       await Wallet.findOneAndUpdate(
         { email },
-        { $inc: { balance: Number(total) } }
+        {
+          $inc: { balance: Number(total) }
+        }
       );
 
       return res.status(response.status).json({
@@ -275,21 +291,22 @@ app.post('/create-order', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Create Order Error:', error);
+    console.error('CREATE ORDER ERROR');
+    console.error(error);
+    console.error(error.stack);
 
-    // Refund if amount was deducted
-    if (amountDeducted && customer?.email) {
+    // Refund wallet if deducted
+    if (amountDeducted && email) {
       try {
         await Wallet.findOneAndUpdate(
-          {
-            email: customer.email.toLowerCase().trim()
-          },
+          { email },
           {
             $inc: { balance: Number(total) }
           }
         );
       } catch (refundError) {
-        console.error('Refund Error:', refundError);
+        console.error('REFUND ERROR');
+        console.error(refundError);
       }
     }
 
