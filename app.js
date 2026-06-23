@@ -167,8 +167,7 @@ app.post('/create-order', async (req, res) => {
       total
     } = req.body;
 
-<<<<<<< HEAD
-<<<<<<< HEAD
+
     if (!cart_items || !cart_items.length) {
       return res.status(400).json({
         success: false,
