@@ -157,8 +157,10 @@ app.post('/orders', async (req, res) => {
   }
 });
 
-
 app.post('/create-order', async (req, res) => {
+  let wallet = null;
+  let amountDeducted = false;
+
   try {
     const {
       customer,
@@ -166,41 +168,53 @@ app.post('/create-order', async (req, res) => {
       cart_items,
       total
     } = req.body;
-  
-   
-    // if (!cart_items || !cart_items.length) {
-    //   return res.status(400).json({
-    //     success: false,
-    //     message: 'Cart is empty'
-    //   });
-    // }
-    console.log(cart_items)
 
-  
-    const wallet = await Wallet.findOne({
-      email: customer.email.toLowerCase()
-    });
-
-    if (!wallet) {
-      return res.status(404).json({
-        success: false,
-        message: 'Wallet not found'
-      });
-    }
-
-    // Check balance
-    if (wallet.balance < total) {
+    // Validation
+    if (!customer?.email) {
       return res.status(400).json({
         success: false,
-        message: 'Insufficient wallet balance',
-        balance: wallet.balance,
-        required: total
+        message: 'Customer email is required'
       });
     }
 
-    // Deduct amount
-    wallet.balance -= total;
-    await wallet.save();
+    if (!cart_items || !Array.isArray(cart_items) || cart_items.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cart is empty'
+      });
+    }
+
+    if (!total || Number(total) <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid order total'
+      });
+    }
+
+    const email = customer.email.toLowerCase().trim();
+
+    // Atomic wallet deduction
+    wallet = await Wallet.findOneAndUpdate(
+      {
+        email,
+        balance: { $gte: Number(total) }
+      },
+      {
+        $inc: { balance: -Number(total) }
+      },
+      {
+        new: true
+      }
+    );
+
+    if (!wallet) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient wallet balance or wallet not found'
+      });
+    }
+
+    amountDeducted = true;
 
     const line_items = cart_items.map(item => ({
       variant_id: item.variant_id,
@@ -209,15 +223,15 @@ app.post('/create-order', async (req, res) => {
 
     const shopifyPayload = {
       order: {
-        email: customer.email,
+        email,
         financial_status: 'paid',
         line_items,
         shipping_address: {
-          first_name: shipping_address.name,
-          address1: shipping_address.address,
-          city: shipping_address.city,
-          zip: shipping_address.pincode,
-          phone: shipping_address.phone,
+          first_name: shipping_address?.name || '',
+          address1: shipping_address?.address || '',
+          city: shipping_address?.city || '',
+          zip: shipping_address?.pincode || '',
+          phone: shipping_address?.phone || '',
           country: 'India'
         }
       }
@@ -229,28 +243,30 @@ app.post('/create-order', async (req, res) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Shopify-Access-Token':
-            process.env.SHOPIFY_ADMIN_TOKEN
+          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
         },
         body: JSON.stringify(shopifyPayload)
       }
     );
 
-    const data = await response.json();
+    const data = await response.json().catch(() => ({}));
 
+    // Shopify order failed
     if (!response.ok) {
 
-      // Refund wallet if Shopify order fails
-      wallet.balance += total;
-      await wallet.save();
+      await Wallet.findOneAndUpdate(
+        { email },
+        { $inc: { balance: Number(total) } }
+      );
 
       return res.status(response.status).json({
         success: false,
-        shopify: data
+        message: 'Shopify order creation failed',
+        shopify_error: data
       });
     }
 
-    res.json({
+    return res.status(200).json({
       success: true,
       order_id: data.order.id,
       order_number: data.order.order_number,
@@ -259,169 +275,28 @@ app.post('/create-order', async (req, res) => {
     });
 
   } catch (error) {
-    console.error(error);
+    console.error('Create Order Error:', error);
 
-  try {
-
-    const {
-      customer,
-      shipping_address,
-      cart_items
-    } = req.body;
-
-    if (!cart_items || !cart_items.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cart is empty'
-      });
-    }
-
-  try {
-
-    const {
-      customer,
-      shipping_address,
-      cart_items
-    } = req.body;
-
-    if (!cart_items || !cart_items.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cart is empty'
-      });
-    }
-
-    const line_items = cart_items.map(item => ({
-      variant_id: item.variant_id,
-      quantity: item.quantity
-    }));
-
-    const shopifyPayload = {
-      order: {
-        email: customer.email,
-
-        financial_status: 'pending',
-
-        line_items,
-
-        shipping_address: {
-          first_name: shipping_address.name,
-          address1: shipping_address.address,
-          city: shipping_address.city,
-          zip: shipping_address.pincode,
-          phone: shipping_address.phone,
-          country: 'India'
-        }
+    // Refund if amount was deducted
+    if (amountDeducted && customer?.email) {
+      try {
+        await Wallet.findOneAndUpdate(
+          {
+            email: customer.email.toLowerCase().trim()
+          },
+          {
+            $inc: { balance: Number(total) }
+          }
+        );
+      } catch (refundError) {
+        console.error('Refund Error:', refundError);
       }
-    };
-
-    const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/orders.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token':
-            process.env.SHOPIFY_ADMIN_TOKEN
-        },
-        body: JSON.stringify(shopifyPayload)
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        shopify: data
-      });
     }
 
-    res.json({
-      success: true,
-      order_id: data.order.id,
-      order_number: data.order.order_number,
-      order_name: data.order.name
-    });
-
-  } catch (error) {
-
-    console.error(error);
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-      message: error.message
-    });
-
-  }
-
-    const line_items = cart_items.map(item => ({
-      variant_id: item.variant_id,
-      quantity: item.quantity
-    }));
-
-    const shopifyPayload = {
-      order: {
-        email: customer.email,
-
-        financial_status: 'pending',
-
-        line_items,
-
-        shipping_address: {
-          first_name: shipping_address.name,
-          address1: shipping_address.address,
-          city: shipping_address.city,
-          zip: shipping_address.pincode,
-          phone: shipping_address.phone,
-          country: 'India'
-        }
-      }
-    };
-
-    const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/orders.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token':
-            process.env.SHOPIFY_ADMIN_TOKEN
-        },
-        body: JSON.stringify(shopifyPayload)
-      }
-    );
-
-    const data = await response.json();
-
-    if (!response.ok) {
-      return res.status(response.status).json({
-        success: false,
-        shopify: data
-      });
-    }
-
-    res.json({
-      success: true,
-      order_id: data.order.id,
-      order_number: data.order.order_number,
-      order_name: data.order.name
-    });
-
-  } catch (error) {
-
-    console.error(error);
-
-    res.status(500).json({
-      success: false,
-      message: error.message
-    });
-
-  }
-
-    res.status(500).json({
-      success: false,
-      message: error.message
+      message: 'Internal Server Error',
+      error: error.message
     });
   }
 });
