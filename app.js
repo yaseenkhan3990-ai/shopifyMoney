@@ -166,16 +166,17 @@ app.post('/create-order', async (req, res) => {
       cart_items,
       total
     } = req.body;
+  
+   
+    // if (!cart_items || !cart_items.length) {
+    //   return res.status(400).json({
+    //     success: false,
+    //     message: 'Cart is empty'
+    //   });
+    // }
+    console.log(cart_items)
 
-
-    if (!cart_items || !cart_items.length) {
-      return res.status(400).json({
-        success: false,
-        message: 'Cart is empty'
-      });
-    }
-
-    // Find wallet by email
+  
     const wallet = await Wallet.findOne({
       email: customer.email.toLowerCase()
     });
