@@ -171,17 +171,6 @@ app.post('/create-order', async (req, res) => {
       total: orderTotal
     } = req.body;
 
-    console.log('================ CREATE ORDER ================');
-    console.log(JSON.stringify(req.body, null, 2));
-
-  
-    if (!process.env.SHOPIFY_STORE) {
-      throw new Error('SHOPIFY_STORE is missing');
-    }
-
-    if (!process.env.SHOPIFY_ADMIN_TOKEN) {
-      throw new Error('SHOPIFY_ADMIN_TOKEN is missing');
-    }
 
     if (!customer?.email) {
       return res.status(400).json({
@@ -244,9 +233,6 @@ app.post('/create-order', async (req, res) => {
       };
     });
 
-    // --------------------------------------------------
-    // SHOPIFY PAYLOAD
-    // --------------------------------------------------
 
     const shopifyPayload = {
       order: {
@@ -274,16 +260,12 @@ app.post('/create-order', async (req, res) => {
       controller.abort();
     }, 30000);
 
-    const apiVersion =
-      process.env.SHOPIFY_API_VERSION || '2026-01';
-
-    const shopifyUrl =
-      `https://${process.env.SHOPIFY_STORE}` +
-      `/admin/api/${apiVersion}/orders.json`;
-
+  
+    
     console.log('SHOPIFY URL:', shopifyUrl);
 
-    const response = await fetch(shopifyUrl, {
+    const response = await fetch(`https://${process.env.SHOPIFY_STORE}` +
+      `/admin/api/2026-01/orders.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -312,10 +294,6 @@ app.post('/create-order', async (req, res) => {
         `Shopify returned invalid JSON. Status=${response.status}. Body=${rawResponse}`
       );
     }
-
-    // --------------------------------------------------
-    // SHOPIFY FAILURE
-    // --------------------------------------------------
 
     if (!response.ok) {
       if (amountDeducted) {
