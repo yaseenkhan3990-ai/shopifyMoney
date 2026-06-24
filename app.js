@@ -160,25 +160,29 @@ app.post('/orders', async (req, res) => {
 app.post('/create-order', async (req, res) => {
   let wallet = null;
   let amountDeducted = false;
-
-  let customer;
-  let shipping_address;
-  let cart_items;
-  let total;
-  let email;
+  let email = null;
+  let total = 0;
 
   try {
-    ({
+    const {
       customer,
       shipping_address,
       cart_items,
-      total
-    } = req.body);
+      total: orderTotal
+    } = req.body;
 
-    console.log('REQUEST BODY:');
+    console.log('================ CREATE ORDER ================');
     console.log(JSON.stringify(req.body, null, 2));
 
-    // Validation
+  
+    if (!process.env.SHOPIFY_STORE) {
+      throw new Error('SHOPIFY_STORE is missing');
+    }
+
+    if (!process.env.SHOPIFY_ADMIN_TOKEN) {
+      throw new Error('SHOPIFY_ADMIN_TOKEN is missing');
+    }
+
     if (!customer?.email) {
       return res.status(400).json({
         success: false,
@@ -193,23 +197,25 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    if (!total || Number(total) <= 0) {
+    total = Number(orderTotal);
+
+    if (isNaN(total) || total <= 0) {
       return res.status(400).json({
         success: false,
         message: 'Invalid order total'
       });
     }
 
-    email = customer.email.toLowerCase().trim();
+    email = customer.email.trim().toLowerCase();
 
-    // Deduct wallet balance atomically
+    
     wallet = await Wallet.findOneAndUpdate(
       {
         email,
-        balance: { $gte: Number(total) }
+        balance: { $gte: total }
       },
       {
-        $inc: { balance: -Number(total) }
+        $inc: { balance: -total }
       },
       {
         new: true
@@ -225,10 +231,22 @@ app.post('/create-order', async (req, res) => {
 
     amountDeducted = true;
 
-    const line_items = cart_items.map(item => ({
-      variant_id: item.variant_id,
-      quantity: item.quantity
-    }));
+    const line_items = cart_items.map(item => {
+      if(!item.variant_id) {
+        throw new Error(
+          `Missing variant_id for product ${item.title || ''}`
+        );
+      }
+
+      return {
+        variant_id: Number(item.variant_id),
+        quantity: Number(item.quantity || 1)
+      };
+    });
+
+    // --------------------------------------------------
+    // SHOPIFY PAYLOAD
+    // --------------------------------------------------
 
     const shopifyPayload = {
       order: {
@@ -246,63 +264,105 @@ app.post('/create-order', async (req, res) => {
       }
     };
 
-    console.log('SHOPIFY PAYLOAD:');
+    console.log('SHOPIFY PAYLOAD');
     console.log(JSON.stringify(shopifyPayload, null, 2));
 
-    const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/orders.json`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
-        },
-        body: JSON.stringify(shopifyPayload)
-      }
-    );
+ 
+    const controller = new AbortController();
 
-    const data = await response.json();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 30000);
 
-    console.log('SHOPIFY RESPONSE:');
-    console.log(JSON.stringify(data, null, 2));
+    const apiVersion =
+      process.env.SHOPIFY_API_VERSION || '2026-01';
+
+    const shopifyUrl =
+      `https://${process.env.SHOPIFY_STORE}` +
+      `/admin/api/${apiVersion}/orders.json`;
+
+    console.log('SHOPIFY URL:', shopifyUrl);
+
+    const response = await fetch(shopifyUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token':
+          process.env.SHOPIFY_ADMIN_TOKEN
+      },
+      body: JSON.stringify(shopifyPayload),
+      signal: controller.signal
+    });
+
+    clearTimeout(timeout);
+
+    const rawResponse = await response.text();
+
+    console.log('SHOPIFY STATUS:', response.status);
+    console.log('SHOPIFY RESPONSE:', rawResponse);
+
+    let data = {};
+
+    try {
+      data = rawResponse
+        ? JSON.parse(rawResponse)
+        : {};
+    } catch (parseError) {
+      throw new Error(
+        `Shopify returned invalid JSON. Status=${response.status}. Body=${rawResponse}`
+      );
+    }
+
+    // --------------------------------------------------
+    // SHOPIFY FAILURE
+    // --------------------------------------------------
 
     if (!response.ok) {
-      // Refund wallet
-      await Wallet.findOneAndUpdate(
-        { email },
-        {
-          $inc: { balance: Number(total) }
-        }
-      );
+      if (amountDeducted) {
+        await Wallet.findOneAndUpdate(
+          { email },
+          { $inc: { balance: total } }
+        );
+
+        amountDeducted = false;
+      }
 
       return res.status(response.status).json({
         success: false,
         message: 'Shopify order creation failed',
+        shopify_status: response.status,
         shopify_error: data
       });
     }
 
+    // --------------------------------------------------
+    // SUCCESS
+    // --------------------------------------------------
+
     return res.status(200).json({
       success: true,
-      order_id: data.order.id,
-      order_number: data.order.order_number,
-      order_name: data.order.name,
+      order_id: data?.order?.id,
+      order_number: data?.order?.order_number,
+      order_name: data?.order?.name,
       remaining_balance: wallet.balance
     });
 
   } catch (error) {
-    console.error('CREATE ORDER ERROR');
+    console.error('================ ERROR ================');
     console.error(error);
     console.error(error.stack);
 
-    // Refund wallet if deducted
+    // Refund only if still deducted
+
     if (amountDeducted && email) {
       try {
         await Wallet.findOneAndUpdate(
           { email },
-          {
-            $inc: { balance: Number(total) }
-          }
+          { $inc: { balance: Number(total) } }
+        );
+
+        console.log(
+          `Wallet refunded: ${email} amount=${total}`
         );
       } catch (refundError) {
         console.error('REFUND ERROR');
@@ -317,7 +377,6 @@ app.post('/create-order', async (req, res) => {
     });
   }
 });
-
 const startServer = async () => {
   await connectDB();
 
