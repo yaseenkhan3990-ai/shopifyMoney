@@ -311,10 +311,7 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    // --------------------------------------------------
-    // SUCCESS
-    // --------------------------------------------------
-
+    
     return res.status(200).json({
       success: true,
       order_id: data?.order?.id,
@@ -324,7 +321,6 @@ app.post('/create-order', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('================ ERROR ================');
     console.error(error);
     console.error(error.stack);
 
@@ -351,6 +347,7 @@ app.post('/create-order', async (req, res) => {
       message: 'Internal Server Error',
       error: error.message
     });
+
   }
 });
 const startServer = async () => {
