@@ -262,10 +262,8 @@ app.post('/create-order', async (req, res) => {
 
   
     
-    console.log('SHOPIFY URL:', shopifyUrl);
-
-    const response = await fetch(`https://${process.env.SHOPIFY_STORE}` +
-      `/admin/api/2026-01/orders.json`, {
+   
+    const response = await fetch(`https://${process.env.SHOPIFY_STORE}/admin/api/2026-01/orders.json`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
