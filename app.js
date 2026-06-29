@@ -157,156 +157,15 @@ app.post('/orders', async (req, res) => {
   }
 });
 
-// app.post('/create-order', async (req, res) => {
-//   let amountDeducted = false;
-//   let email;
-//   let total;
-
-//   try {
-//     const { customer, shipping_address, cart_items, total: orderTotal } = req.body;
-
-  
-//     if (!customer?.email) {
-//       return res.status(400).json({
-//         success: false,
-//         message: 'Customer email is required'
-//       });
-//     }
-
-//     if (!Array.isArray(cart_items) || cart_items.length === 0) {
-//       return res.status(400).json({
-//         success: false,
-//         message: 'Cart is empty'
-//       });
-//     }
-
-//     email = customer.email.trim().toLowerCase();
-//     total = Number(orderTotal);
-
-//     if (!total || total <= 0) {
-//       return res.status(400).json({
-//         success: false,
-//         message: 'Invalid order total'
-//       });
-//     }
-
- 
-//     const wallet = await Wallet.findOneAndUpdate(
-//       {
-//         email,
-//         balance: { $gte: total }
-//       },
-//       {
-//         $inc: { balance: -total }
-//       },
-//       {
-//         new: true
-//       }
-//     );
-
-//     if (!wallet) {
-//       return res.status(400).json({
-//         success: false,
-//         message: 'Insufficient wallet balance'
-//       });
-//     }
-
-//     amountDeducted = true;
-
-   
-//     const line_items = cart_items.map(item => ({
-//       variant_id: Number(item.variant_id),
-//       quantity: Number(item.quantity || 1)
-//     }));
-
-    
-//     const shopifyPayload = {
-//       order: {
-//         email,
-//         financial_status: 'paid',
-//         line_items,
-//         shipping_address: {
-//           first_name: shipping_address?.name || '',
-//           address1: shipping_address?.address || '',
-//           city: shipping_address?.city || '',
-//           zip: shipping_address?.pincode || '',
-//           phone: shipping_address?.phone || '',
-//           country: 'India'
-//         }
-//       }
-//     };
-
-//     console.log(
-//       'Shopify Payload:',
-//       JSON.stringify(shopifyPayload, null, 2)
-//     );
-
-  
-//     const response = await fetch(
-//       `https://${process.env.SHOPIFY_STORE}/admin/api/2026-01/orders.json`,
-//       {
-//         method: 'POST',
-//         headers: {
-//           'Content-Type': 'application/json',
-//           'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
-//         },
-//         body: JSON.stringify(shopifyPayload)
-//       }
-//     );
-
-//     const data = await response.json();
-
-
-//     if (!response.ok) {
-//       await Wallet.findOneAndUpdate(
-//         { email },
-//         { $inc: { balance: total } }
-//       );
-
-//       return res.status(response.status).json({
-//         success: false,
-//         message: 'Shopify order creation failed',
-//         error: data
-//       });
-//     }
-
-
-//     return res.status(200).json({
-//       success: true,
-//       order_id: data.order.id,
-//       order_number: data.order.order_number,
-//       order_name: data.order.name,
-//       remaining_balance: wallet.balance
-//     });
-
-//   } catch (error) {
-//     console.error(error);
-
-//     // Refund if wallet was deducted
-//     if (amountDeducted && email) {
-//       await Wallet.findOneAndUpdate(
-//         { email },
-//         { $inc: { balance: total } }
-//       );
-//     }
-
-//     return res.status(500).json({
-//       success: false,
-//       message: error.message
-//     });
-//   }
-// });
-
-
 app.post('/create-order', async (req, res) => {
-  try {
-    const {
-      customer,
-      shipping_address,
-      cart_items,
-      total: orderTotal
-    } = req.body;
+  let amountDeducted = false;
+  let email;
+  let total;
 
+  try {
+    const { customer, shipping_address, cart_items, total: orderTotal } = req.body;
+
+  
     if (!customer?.email) {
       return res.status(400).json({
         success: false,
@@ -314,86 +173,122 @@ app.post('/create-order', async (req, res) => {
       });
     }
 
-    if (!cart_items?.length) {
+    if (!Array.isArray(cart_items) || cart_items.length === 0) {
       return res.status(400).json({
         success: false,
-        message: 'Cart items are required'
+        message: 'Cart is empty'
       });
     }
 
-    const lineItems = cart_items.map(item => ({
-      variantId: item.variant_id,
-      quantity: Number(item.quantity)
+    email = customer.email.trim().toLowerCase();
+    total = Number(orderTotal);
+
+    if (!total || total <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid order total'
+      });
+    }
+
+ 
+    const wallet = await Wallet.findOneAndUpdate(
+      {
+        email,
+        balance: { $gte: total }
+      },
+      {
+        $inc: { balance: -total }
+      },
+      {
+        new: true
+      }
+    );
+
+    if (!wallet) {
+      return res.status(400).json({
+        success: false,
+        message: 'Insufficient wallet balance'
+      });
+    }
+
+    amountDeducted = true;
+
+   
+    const line_items = cart_items.map(item => ({
+      variant_id: Number(item.variant_id),
+      quantity: Number(item.quantity || 1)
     }));
 
-    const query = `
-      mutation orderCreate($order: OrderCreateOrderInput!) {
-        orderCreate(order: $order) {
-          order {
-            id
-            name
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    const variables = {
+    
+    const shopifyPayload = {
       order: {
-        email: customer.email,
-
-        lineItems,
-
-        shippingAddress: {
-          firstName: shipping_address.first_name,
-          lastName: shipping_address.last_name,
-          address1: shipping_address.address1,
-          city: shipping_address.city,
-          province: shipping_address.province,
-          country: shipping_address.country,
-          zip: shipping_address.zip,
-          phone: shipping_address.phone
+        email,
+        financial_status: 'paid',
+        line_items,
+        shipping_address: {
+          first_name: shipping_address?.name || '',
+          address1: shipping_address?.address || '',
+          city: shipping_address?.city || '',
+          zip: shipping_address?.pincode || '',
+          phone: shipping_address?.phone || '',
+          country: 'India'
         }
       }
     };
 
+    console.log(
+      'Shopify Payload:',
+      JSON.stringify(shopifyPayload, null, 2)
+    );
+
+  
     const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/graphql.json`,
+      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/orders.json`,
       {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
         },
-        body: JSON.stringify({
-          query,
-          variables
-        })
+        body: JSON.stringify(shopifyPayload)
       }
     );
 
-    const result = await response.json();
+    const data = await response.json();
 
-    const errors = result?.data?.orderCreate?.userErrors;
 
-    if (errors?.length) {
-      return res.status(400).json({
+    if (!response.ok) {
+      await Wallet.findOneAndUpdate(
+        { email },
+        { $inc: { balance: total } }
+      );
+
+      return res.status(response.status).json({
         success: false,
-        errors
+        message: 'Shopify order creation failed',
+        error: data
       });
     }
 
-    return res.json({
+
+    return res.status(200).json({
       success: true,
-      order: result.data.orderCreate.order,
-      total: orderTotal
+      order_id: data.order.id,
+      order_number: data.order.order_number,
+      order_name: data.order.name,
+      remaining_balance: wallet.balance
     });
 
-  } catch (error){
+  } catch (error) {
     console.error(error);
+
+    // Refund if wallet was deducted
+    if (amountDeducted && email) {
+      await Wallet.findOneAndUpdate(
+        { email },
+        { $inc: { balance: total } }
+      );
+    }
 
     return res.status(500).json({
       success: false,
@@ -402,9 +297,112 @@ app.post('/create-order', async (req, res) => {
   }
 });
 
+
+// app.post('/create-order', async (req, res) => {
+//   try {
+//     const {
+//       customer,
+//       shipping_address,
+//       cart_items,
+//       total: orderTotal
+//     } = req.body;
+
+//     if (!customer?.email) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Customer email is required'
+//       });
+//     }
+
+//     if (!cart_items?.length) {
+//       return res.status(400).json({
+//         success: false,
+//         message: 'Cart items are required'
+//       });
+//     }
+
+//     const lineItems = cart_items.map(item => ({
+//       variantId: item.variant_id,
+//       quantity: Number(item.quantity)
+//     }));
+
+//     const query = `
+//       mutation orderCreate($order: OrderCreateOrderInput!) {
+//         orderCreate(order: $order) {
+//           order {
+//             id
+//             name
+//           }
+//           userErrors {
+//             field
+//             message
+//           }
+//         }
+//       }
+//     `;
+
+//     const variables = {
+//       order: {
+//         email: customer.email,
+
+//         lineItems,
+
+//         shippingAddress: {
+//           firstName: shipping_address.first_name,
+//           lastName: shipping_address.last_name,
+//           address1: shipping_address.address1,
+//           city: shipping_address.city,
+//           province: shipping_address.province,
+//           country: shipping_address.country,
+//           zip: shipping_address.zip,
+//           phone: shipping_address.phone
+//         }
+//       }
+//     };
+
+//     const response = await fetch(
+//       `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/graphql.json`,
+//       {
+//         method: 'POST',
+//         headers: {
+//           'Content-Type': 'application/json',
+//           'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
+//         },
+//         body: JSON.stringify({
+//           query,
+//           variables
+//         })
+//       }
+//     );
+
+//     const result = await response.json();
+
+//     const errors = result?.data?.orderCreate?.userErrors;
+
+//     if (errors?.length) {
+//       return res.status(400).json({
+//         success: false,
+//         errors
+//       });
+//     }
+
+//     return res.json({
+//       success: true,
+//       order: result.data.orderCreate.order,
+//       total: orderTotal
+//     });
+//   } catch (error){
+//     console.error(error);
+
+//     return res.status(500).json({
+//       success: false,
+//       message: error.message
+//     });
+//   }
+// });
+
 const startServer = async () => {
   await connectDB();
-
   app.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
   });
