@@ -297,6 +297,7 @@ app.post('/orders', async (req, res) => {
 //   }
 // });
 
+
 app.post('/create-order', async (req, res) => {
   try {
     const {
@@ -360,7 +361,7 @@ app.post('/create-order', async (req, res) => {
     };
 
     const response = await fetch(
-      `https://${process.env.SHOPIFY_STORE}/admin/api/2026-04/graphql.json`,
+      `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/graphql.json`,
       {
         method: 'POST',
         headers: {
@@ -391,7 +392,7 @@ app.post('/create-order', async (req, res) => {
       total: orderTotal
     });
 
-  } catch (error) {
+  } catch (error){
     console.error(error);
 
     return res.status(500).json({
