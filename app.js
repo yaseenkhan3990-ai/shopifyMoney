@@ -11,12 +11,13 @@ app.use(cors({ origin: 'https://sitara-style-2.myshopify.com' }));
 
 
 app.use(express.json());
+app.use(express.urlencoded({extended:true}));
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
 const parsePositiveAmount = (amount) => {
   const parsedAmount = Number(amount);
-
+  
   if (!Number.isFinite(parsedAmount) || parsedAmount <= 0) {
     return null;
   }
@@ -303,7 +304,7 @@ app.post('/create-order', async (req, res) => {
   let email;
   let total;
 
-  try {
+  try{
     const { customer, shipping_address, cart_items, total: orderTotal } = req.body;
 
     // Validate request
