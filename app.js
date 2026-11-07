@@ -340,6 +340,10 @@ app.post('/create-order', async (req, res) => {
 });
 
 
+
+
+
+
 const razorpay = new Razorpay({
     key_id: process.env.RAZORPAY_KEY_ID,
     key_secret: process.env.RAZORPAY_KEY_SECRET
@@ -362,35 +366,50 @@ setInterval(() => {
 // ================================
 // SHOPIFY GRAPHQL
 // ================================
-
 async function shopifyGraphQL(query, variables = {}) {
+    const url =
+        `https://${process.env.SHOPIFY_STORE_DOMAIN}` +
+        `/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`;
 
-    const response = await fetch(
-        `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`,
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token":
-                    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
-            },
-            body: JSON.stringify({
-                query,
-                variables
-            })
-        }
-    );
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token":
+                process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+        },
+        body: JSON.stringify({ query, variables })
+    });
 
-    const result = await response.json();
+    const raw = await response.text();
+
+    let result;
+
+    try {
+        result = JSON.parse(raw);
+    } catch {
+        console.error("Shopify returned non-JSON:", {
+            status: response.status,
+            body: raw
+        });
+        throw new Error("Invalid Shopify API response");
+    }
 
     if (!response.ok || result.errors) {
-        console.error("Shopify error:", result);
-        throw new Error("Shopify API request failed");
+        console.error("Shopify GraphQL failure:", {
+            status: response.status,
+            errors: result.errors,
+            body: result
+        });
+
+        throw new Error(
+            result.errors?.map(e => e.message).join(", ") ||
+            `Shopify HTTP ${response.status}`
+        );
     }
 
     return result.data;
 }
-
 // ================================
 // GET VERIFIED SHOPIFY PRICES
 // ================================
