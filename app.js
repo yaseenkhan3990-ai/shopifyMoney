@@ -369,7 +369,7 @@ async function shopifyGraphQL(query, variables = {}) {
             headers: {
                 "Content-Type": "application/json",
                 "X-Shopify-Access-Token":
-                    process.env.SSHOPIFY_ADMIN_TOKEN
+                    process.env.SHOPIFY_ADMIN_TOKEN
             },
             body: JSON.stringify({
                 query,
