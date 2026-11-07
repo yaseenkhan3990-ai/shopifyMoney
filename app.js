@@ -366,50 +366,35 @@ setInterval(() => {
 // ================================
 // SHOPIFY GRAPHQL
 // ================================
+
 async function shopifyGraphQL(query, variables = {}) {
-    const url =
-        `https://${process.env.SHOPIFY_STORE_DOMAIN}` +
-        `/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`;
 
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token":
-                process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
-        },
-        body: JSON.stringify({ query, variables })
-    });
+    const response = await fetch(
+        `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`,
+        {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token":
+                    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+            },
+            body: JSON.stringify({
+                query,
+                variables
+            })
+        }
+    );
 
-    const raw = await response.text();
+    const result = await response.json();
 
-    let result;
-
-    try {
-        result = JSON.parse(raw);
-    } catch {
-        console.error("Shopify returned non-JSON:", {
-            status: response.status,
-            body: raw
-        });
-        throw new Error("Invalid Shopify API response");
-    }
-
-    if (!response.ok || result.errors) {
-        console.error("Shopify GraphQL failure:", {
-            status: response.status,
-            errors: result.errors,
-            body: result
-        });
-
-        throw new Error(
-            result.errors?.map(e => e.message).join(", ") ||
-            `Shopify HTTP ${response.status}`
-        );
-    }
+   if (!response.ok || result.errors) {
+    console.error("Shopify error:", result);
+    throw new Error("Shopify API request failed");
+}
 
     return result.data;
 }
+
 // ================================
 // GET VERIFIED SHOPIFY PRICES
 // ================================
