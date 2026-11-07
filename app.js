@@ -338,567 +338,632 @@ app.post('/create-order', async (req, res) => {
 
 
 const razorpay = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET
 });
 
-// Temporary checkout storage (NO DATABASE)
+// --------------------------------------------------
+// TEMPORARY CHECKOUT STORAGE
+// No MongoDB required.
+// Data is lost when the server restarts.
+// --------------------------------------------------
+
 const checkouts = new Map();
 
-// Expire unfinished checkouts after 30 minutes
-setInterval(() => {
-    const now = Date.now();
+const CHECKOUT_EXPIRY = 24 * 60 * 60 * 1000;
 
-    for (const [id, checkout] of checkouts) {
-        if (now - checkout.createdAt > 30 * 60 * 1000) {
-            checkouts.delete(id);
-        }
+function cleanOldCheckouts() {
+  const cutoff = Date.now() - CHECKOUT_EXPIRY;
+
+  for (const [id, checkout] of checkouts.entries()) {
+    if (
+      checkout.createdAt < cutoff &&
+      checkout.status !== "processing"
+    ) {
+      checkouts.delete(id);
     }
-}, 5 * 60 * 1000).unref();
+  }
+}
 
-// ================================
-// SHOPIFY GRAPHQL
-// ================================
+// --------------------------------------------------
+// HELPERS
+// --------------------------------------------------
+
+function parsePriceToPaise(price) {
+  const value = String(price);
+
+  if (!/^\d+(\.\d{1,2})?$/.test(value)) {
+    throw new Error("Invalid product price");
+  }
+
+  const [rupees, paise = ""] = value.split(".");
+  return Number(rupees) * 100 + Number(paise.padEnd(2, "0"));
+}
+
+function isValidEmail(email) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
+}
+
+function isValidId(value) {
+  return /^\d+$/.test(String(value || ""));
+}
+
+function makeVariantGid(id) {
+  return `gid://shopify/ProductVariant/${id}`;
+}
+
+function verifySignature(orderId, paymentId, signature) {
+  const expected = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(`${orderId}|${paymentId}`)
+    .digest();
+
+  let received;
+
+  try {
+    received = Buffer.from(signature, "hex");
+  } catch {
+    return false;
+  }
+
+  return (
+    received.length === expected.length &&
+    crypto.timingSafeEqual(received, expected)
+  );
+}
+
+// --------------------------------------------------
+// SHOPIFY GRAPHQL HELPER
+// --------------------------------------------------
 
 async function shopifyGraphQL(query, variables = {}) {
+  const url =
+    `https://${SHOPIFY_STORE}/admin/api/2025-10/graphql.json`;
 
-    const response = await fetch(
-        `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/graphql.json`,
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token":
-                    process.env.SHOPIFY_ADMIN_TOKEN
-            },
-            body: JSON.stringify({
-                query,
-                variables
-            })
-        }
-    );
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": process.env.SHOPIFY_ADMIN_TOKEN
+    },
+    body: JSON.stringify({ query, variables })
+  });
 
-    const result = await response.json();
+  const result = await response.json();
 
-   if (!response.ok || result.errors) {
-    console.error("Shopify error:", result);
+  if (!response.ok || result.errors?.length) {
+    console.error("Shopify GraphQL error:", result.errors || result);
     throw new Error("Shopify API request failed");
+  }
+
+  return result.data;
 }
 
-    return result.data;
-}
+// --------------------------------------------------
+// GET VERIFIED SHOPIFY PRODUCT PRICES
+// Never trust prices sent by the browser.
+// --------------------------------------------------
 
-// ================================
-// GET VERIFIED SHOPIFY PRICES
-// ================================
-
-async function getProducts(items) {
-
-    const query = `
-        query GetVariants($ids: [ID!]!) {
-            nodes(ids: $ids) {
-                ... on ProductVariant {
-                    legacyResourceId
-                    price
-                    availableForSale
-                    product {
-                        legacyResourceId
-                    }
-                }
-            }
-
-            shop {
-                name
-                currencyCode
-            }
-        }
-    `;
-
-    const ids = items.map(item =>
-        `gid://shopify/ProductVariant/${item.variantId}`
-    );
-
-    const data = await shopifyGraphQL(query, { ids });
-
-    if (data.shop.currencyCode !== "INR") {
-        throw new Error("Only INR payments are supported");
+async function getVerifiedCart(items) {
+  const ids = items.map(item => {
+    if (
+      !isValidId(item.variantId) ||
+      !isValidId(item.productId)
+    ) {
+      throw new Error("Invalid product or variant ID");
     }
 
-    const variants = new Map();
+    const quantity = Number(item.quantity);
 
-    data.nodes.forEach(variant => {
-        if (variant) {
-            variants.set(
-                String(variant.legacyResourceId),
-                variant
-            );
-        }
-    });
-
-    let total = 0;
-
-    const verifiedItems = items.map(item => {
-
-        const variant = variants.get(String(item.variantId));
-
-        if (
-            !variant ||
-            !variant.availableForSale ||
-            String(variant.product.legacyResourceId) !==
-                String(item.productId)
-        ) {
-            throw new Error("Invalid or unavailable product");
-        }
-
-        const match = String(variant.price).match(
-            /^(\d+)(?:\.(\d{1,2}))?$/
-        );
-
-        if (!match) {
-            throw new Error("Invalid product price");
-        }
-
-        const price =
-            Number(match[1]) * 100 +
-            Number((match[2] || "").padEnd(2, "0"));
-
-        total += price * item.quantity;
-
-        return {
-            productId: String(item.productId),
-            variantId: String(item.variantId),
-            quantity: item.quantity
-        };
-    });
-
-    if (!Number.isSafeInteger(total) || total <= 0) {
-        throw new Error("Invalid payment amount");
+    if (
+      !Number.isInteger(quantity) ||
+      quantity < 1 ||
+      quantity > 100
+    ) {
+      throw new Error("Invalid product quantity");
     }
 
-    return {
-        total,
-        items: verifiedItems,
-        storeName: data.shop.name
-    };
-}
+    return makeVariantGid(item.variantId);
+  });
 
-// ================================
-// CREATE SHOPIFY ORDER
-// ================================
-
-async function createShopifyOrder(checkout) {
-
-    const mutation = `
-        mutation CreateOrder($order: OrderCreateOrderInput!) {
-            orderCreate(order: $order) {
-                order {
-                    id
-                    name
-                    displayFinancialStatus
-                    statusPageUrl
-                }
-
-                userErrors {
-                    field
-                    message
-                }
-            }
+  const query = `
+    query GetCheckoutVariants($ids: [ID!]!) {
+      nodes(ids: $ids) {
+        ... on ProductVariant {
+          id
+          legacyResourceId
+          price
+          availableForSale
+          product {
+            legacyResourceId
+          }
         }
-    `;
+      }
 
-    const customer = checkout.customer;
-    const address = customer.address;
-
-    const orderInput = {
-
-        email: customer.email,
-        phone: customer.phone,
-
-        financialStatus: "PAID",
-
-        currency: "INR",
-
-        shippingAddress: {
-            firstName: customer.firstName,
-            lastName: customer.lastName,
-            address1: address.address1,
-            address2: address.address2 || "",
-            city: address.city,
-            province: address.province || "",
-            zip: address.postalCode,
-            countryCode: "IN",
-            phone: customer.phone
-        },
-
-        lineItems: checkout.items.map(item => ({
-            variantId:
-                `gid://shopify/ProductVariant/${item.variantId}`,
-            quantity: item.quantity
-        })),
-
-        note: [
-            customer.note || "",
-            `Razorpay Payment ID: ${checkout.paymentId}`,
-            `Checkout ID: ${checkout.checkoutId}`
-        ].filter(Boolean).join("\n"),
-
-        tags: ["Razorpay", "Online Payment"]
-    };
-
-    const data = await shopifyGraphQL(
-        mutation,
-        { order: orderInput }
-    );
-
-    const result = data.orderCreate;
-
-    if (result.userErrors.length) {
-        throw new Error(
-            result.userErrors.map(e => e.message).join(", ")
-        );
+      shop {
+        name
+        currencyCode
+      }
     }
+  `;
 
-    if (!result.order) {
-        throw new Error("Shopify order creation failed");
+  const data = await shopifyGraphQL(query, { ids });
+
+  if (data.shop.currencyCode !== "INR") {
+    throw new Error("This checkout currently supports INR only");
+  }
+
+  const variants = new Map();
+
+  for (const variant of data.nodes) {
+    if (variant) {
+      variants.set(
+        String(variant.legacyResourceId),
+        variant
+      );
     }
+  }
 
-    return result.order;
-}
+  let total = 0;
+  const verifiedItems = [];
 
-// ================================
-// API 1: RECEIVE CART + CREATE PAYMENT
-// POST /api/payments/create-order
-// ================================
+  for (const item of items) {
+    const variant = variants.get(String(item.variantId));
 
-
-app.post("/api/payments/create-order", async (req, res) => {
-
-    try {
-
-        const { shop, customer, items } = req.body;
-
-        if (shop !== process.env.SHOPIFY_STORE) {
-            return res.status(403).json({
-                message: "Invalid store"
-            });
-        }
-
-        if (
-            !customer ||
-            !customer.firstName ||
-            !customer.lastName ||
-            !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email || "") ||
-            !customer.phone ||
-            !customer.address?.address1 ||
-            !customer.address?.city ||
-            !customer.address?.postalCode
-        ) {
-            return res.status(400).json({
-                message: "Invalid customer details"
-            });
-        }
-
-        // if (
-        //     typeof cartToken !== "string" ||
-        //     !cartToken ||
-        //     cartToken.length > 512
-        // ) {
-        //     return res.status(400).json({
-        //         message: "Invalid cart token"
-        //     });
-        // }
-
-        if (
-            !Array.isArray(items) ||
-            items.length === 0 ||
-            items.length > 50
-        ) {
-            return res.status(400).json({
-                message: "Cart is empty"
-            });
-        }
-
-        for (const item of items) {
-
-            if (
-                !/^\d+$/.test(String(item.productId)) ||
-                !/^\d+$/.test(String(item.variantId)) ||
-                !Number.isSafeInteger(item.quantity) ||
-                item.quantity < 1 ||
-                item.quantity > 100
-            ) {
-                return res.status(400).json({
-                    message: "Invalid cart item"
-                });
-            }
-        }
-
-        // Get actual Shopify prices
-        const verified = await getProducts(items);
-
-        // Create checkout ID
-        const checkoutId = crypto.randomUUID();
-
-        // Create Razorpay order
-        const razorpayOrder = await razorpay.orders.create({
-
-            amount: verified.total,
-            currency: "INR",
-
-            receipt: checkoutId.replace(/-/g, "").slice(0, 40),
-
-            notes: {
-                checkoutId,
-                shop
-            }
-        });
-
-        // Store temporarily in server memory
-        checkouts.set(checkoutId, {
-
-            checkoutId,
-            shop,
-            customer,
-
-            items: verified.items,
-
-            amount: verified.total,
-            currency: "INR",
-
-            razorpayOrderId: razorpayOrder.id,
-
-            createdAt: Date.now(),
-
-            status: "created"
-
-        });
-
-        return res.status(201).json({
-
-            success: true,
-
-            checkoutId,
-
-            razorpayOrderId: razorpayOrder.id,
-
-            amount: verified.total,
-
-            currency: "INR",
-
-            storeName: verified.storeName
-
-        });
-
-    } catch (error) {
-
-        console.error(error);
-
-        return res.status(400).json({
-            success: false,
-            message: error.message
-        });
-    }
-});
-
-// ================================
-// API 2: VERIFY PAYMENT + CREATE SHOPIFY ORDER
-// POST /api/payments/verify
-// ================================
-
-app.post("/api/payments/verify", async (req, res) => {
-
-    try {
-
-        const {
-            checkoutId,
-            razorpay_payment_id,
-            razorpay_order_id,
-            razorpay_signature
-        } = req.body;
-
-        const checkout = checkouts.get(checkoutId);
-
-        if (!checkout) {
-            return res.status(404).json({
-                message: "Checkout expired or not found"
-            });
-        }
-
-        if (checkout.status === "processing") {
-            return res.status(409).json({
-                message: "Order is already processing"
-            });
-        }
-
-        if (
-            checkout.razorpayOrderId !== razorpay_order_id ||
-            !razorpay_payment_id ||
-            !razorpay_signature
-        ) {
-            return res.status(400).json({
-                message: "Invalid payment details"
-            });
-        }
-
-        // Verify signature
-        const expected = crypto
-            .createHmac(
-                "sha256",
-                process.env.RAZORPAY_KEY_SECRET
-            )
-            .update(
-                `${razorpay_order_id}|${razorpay_payment_id}`
-            )
-            .digest();
-
-        const received = Buffer.from(
-            razorpay_signature,
-            "hex"
-        );
-
-        if (
-            received.length !== expected.length ||
-            !crypto.timingSafeEqual(expected, received)
-        ) {
-            return res.status(400).json({
-                message: "Invalid payment signature"
-            });
-        }
-
-        // Verify directly with Razorpay
-        let payment = await razorpay.payments.fetch(
-            razorpay_payment_id
-        );
-
-        if (
-            payment.order_id !== checkout.razorpayOrderId ||
-            payment.amount !== checkout.amount ||
-            payment.currency !== checkout.currency
-        ) {
-            return res.status(400).json({
-                message: "Payment details mismatch"
-            });
-        }
-
-        // Capture payment if authorized
-        if (payment.status === "authorized") {
-
-            await razorpay.payments.capture(
-                razorpay_payment_id,
-                checkout.amount,
-                checkout.currency
-            );
-
-            payment = await razorpay.payments.fetch(
-                razorpay_payment_id
-            );
-        }
-
-        if (payment.status !== "captured") {
-            return res.status(409).json({
-                message: "Payment is not captured"
-            });
-        }
-
-        // Prevent duplicate processing
-        checkout.status = "processing";
-        checkout.paymentId = razorpay_payment_id;
-
-        try {
-
-            // Create actual Shopify order
-            const shopifyOrder = await createShopifyOrder(checkout);
-
-            checkout.status = "completed";
-            checkout.shopifyOrderId = shopifyOrder.id;
-            checkout.orderName = shopifyOrder.name;
-
-            return res.json({
-
-                success: true,
-
-                message: "Payment successful. Shopify order created.",
-
-                orderName: shopifyOrder.name,
-
-                shopifyOrderId: shopifyOrder.id,
-
-                financialStatus:
-                    shopifyOrder.displayFinancialStatus,
-
-                statusPageUrl: shopifyOrder.statusPageUrl
-
-            });
-
-        } catch (error) {
-
-            // Keep checkout for manual/retry recovery
-            checkout.status = "paid_pending_shopify";
-
-            console.error("Shopify order error:", error);
-
-            return res.status(502).json({
-
-                success: false,
-
-                paymentCaptured: true,
-
-                message:
-                    "Payment received, but Shopify order creation failed. Please contact support. Do not pay again."
-
-            });
-        }
-
-    } catch (error) {
-
-        console.error(error);
-
-        return res.status(500).json({
-            success: false,
-            message: "Payment verification failed"
-        });
-    }
-});
-
-// ================================
-// API 3: PAYMENT FAILURE
-// POST /api/payments/failure
-// ================================
-
-app.post("/api/payments/failure", async (req, res) => {
-
-    const { checkoutId, error } = req.body;
-
-    const checkout = checkouts.get(checkoutId);
-
-    if (!checkout) {
-        return res.status(404).json({
-            message: "Checkout not found"
-        });
+    if (!variant) {
+      throw new Error(`Variant ${item.variantId} not found`);
     }
 
     if (
-        checkout.status === "completed" ||
-        checkout.status === "paid_pending_shopify"
+      String(variant.product.legacyResourceId) !==
+      String(item.productId)
     ) {
-        return res.status(409).json({
-            message: "Payment already received"
-        });
+      throw new Error("Product and variant do not match");
     }
 
-    checkout.status = "failed";
+    if (!variant.availableForSale) {
+      throw new Error("One or more products are unavailable");
+    }
 
-    checkout.failure = {
-        code: error?.code,
-        description: error?.description,
-        reason: error?.reason
+    const quantity = Number(item.quantity);
+    const unitPrice = parsePriceToPaise(variant.price);
+
+    total += unitPrice * quantity;
+
+    verifiedItems.push({
+      productId: String(item.productId),
+      variantId: String(item.variantId),
+      quantity
+    });
+  }
+
+  if (!Number.isSafeInteger(total) || total <= 0) {
+    throw new Error("Invalid checkout amount");
+  }
+
+  return {
+    amount: total,
+    currency: "INR",
+    storeName: data.shop.name,
+    items: verifiedItems
+  };
+}
+
+// --------------------------------------------------
+// CREATE SHOPIFY ORDER AFTER PAYMENT
+// --------------------------------------------------
+
+async function createShopifyOrder(checkout) {
+  const customer = checkout.customer;
+
+  const transactionAmount = (checkout.amount / 100).toFixed(2);
+
+  const mutation = `
+    mutation CreatePaidOrder($order: OrderCreateOrderInput!) {
+      orderCreate(order: $order) {
+        order {
+          id
+          name
+          displayFinancialStatus
+          statusPageUrl
+        }
+
+        userErrors {
+          field
+          message
+        }
+      }
+    }
+  `;
+
+  const orderInput = {
+    email: customer.email,
+    phone: customer.phone || undefined,
+    currency: "INR",
+    financialStatus: "PAID",
+
+    shippingAddress: {
+      firstName: customer.firstName || "",
+      lastName: customer.lastName || "",
+      address1: customer.address.address1,
+      address2: customer.address.address2 || "",
+      city: customer.address.city,
+      province: customer.address.province || "",
+      zip: customer.address.postalCode,
+      countryCode: "IN",
+      phone: customer.phone || undefined
+    },
+
+    lineItems: checkout.items.map(item => ({
+      variantId: makeVariantGid(item.variantId),
+      quantity: item.quantity
+    })),
+
+    note: [
+      customer.note || "",
+      `Razorpay Payment ID: ${checkout.paymentId}`,
+      `Checkout ID: ${checkout.checkoutId}`
+    ].filter(Boolean).join("\n"),
+
+    tags: ["Razorpay", "Online Payment"],
+
+    transactions: [
+      {
+        kind: "SALE",
+        status: "SUCCESS",
+        gateway: "Razorpay",
+        amountSet: {
+          shopMoney: {
+            amount: transactionAmount,
+            currencyCode: "INR"
+          },
+          presentmentMoney: {
+            amount: transactionAmount,
+            currencyCode: "INR"
+          }
+        }
+      }
+    ]
+  };
+
+  const data = await shopifyGraphQL(mutation, {
+    order: orderInput
+  });
+
+  const result = data.orderCreate;
+
+  if (result.userErrors?.length) {
+    console.error("Shopify order errors:", result.userErrors);
+    throw new Error(
+      result.userErrors.map(error => error.message).join(", ")
+    );
+  }
+
+  if (!result.order) {
+    throw new Error("Shopify did not return an order");
+  }
+
+  return result.order;
+}
+
+// --------------------------------------------------
+// SERVICE STATUS
+// --------------------------------------------------
+
+app.get("/", (req, res) => {
+  res.json({
+    success: true,
+    message: "Shopify Razorpay payment server is running",
+    endpoints: [
+      "POST /api/payments/create-order",
+      "POST /api/payments/verify",
+      "POST /api/payments/failure"
+    ]
+  });
+});
+
+// --------------------------------------------------
+// CREATE RAZORPAY ORDER
+// POST /api/payments/create-order
+// --------------------------------------------------
+
+app.post("/api/payments/create-order", async (req, res) => {
+  try {
+    cleanOldCheckouts();
+
+    const { shop, customer, items } = req.body;
+
+    if (
+      String(shop || "").toLowerCase() !== SHOPIFY_STORE
+    ) {
+      return res.status(403).json({
+        success: false,
+        message: "Invalid Shopify store"
+      });
+    }
+
+    if (!customer || !customer.email || !isValidEmail(customer.email)) {
+      return res.status(400).json({
+        success: false,
+        message: "Valid customer email is required"
+      });
+    }
+
+    if (
+      !customer.address ||
+      !customer.address.address1 ||
+      !customer.address.city ||
+      !customer.address.postalCode
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Complete shipping address is required"
+      });
+    }
+
+    if (
+      !Array.isArray(items) ||
+      items.length === 0 ||
+      items.length > 50
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid cart items"
+      });
+    }
+
+    // Get actual prices from Shopify.
+    const cart = await getVerifiedCart(items);
+
+    const checkoutId = crypto.randomUUID();
+
+    // Create Razorpay order.
+    const razorpayOrder = await razorpay.orders.create({
+      amount: cart.amount,
+      currency: cart.currency,
+      receipt: checkoutId.slice(0, 40),
+      notes: {
+        checkoutId,
+        shop: SHOPIFY_STORE
+      }
+    });
+
+    const checkout = {
+      checkoutId,
+      shop: SHOPIFY_STORE,
+      customer,
+      items: cart.items,
+      amount: cart.amount,
+      currency: cart.currency,
+      storeName: cart.storeName,
+      razorpayOrderId: razorpayOrder.id,
+      paymentId: null,
+      status: "created",
+      createdAt: Date.now(),
+      processingAt: null,
+      shopifyOrderId: null,
+      orderName: null,
+      statusPageUrl: null
     };
 
+    checkouts.set(checkoutId, checkout);
+
     return res.json({
-        success: true,
-        message: "Payment failure recorded"
+      success: true,
+      checkoutId,
+      razorpayOrderId: razorpayOrder.id,
+      amount: cart.amount,
+      currency: cart.currency,
+      storeName: cart.storeName
     });
+
+  } catch (error) {
+    console.error("Create order error:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Could not create payment order"
+    });
+  }
 });
+
+// --------------------------------------------------
+// VERIFY RAZORPAY PAYMENT AND CREATE SHOPIFY ORDER
+// POST /api/payments/verify
+// --------------------------------------------------
+
+app.post("/api/payments/verify", async (req, res) => {
+  let checkout;
+
+  try {
+    const {
+      checkoutId,
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature
+    } = req.body;
+
+    if (
+      !checkoutId ||
+      !razorpay_order_id ||
+      !razorpay_payment_id ||
+      !razorpay_signature
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing payment verification details"
+      });
+    }
+
+    checkout = checkouts.get(checkoutId);
+
+    if (!checkout) {
+      return res.status(404).json({
+        success: false,
+        message: "Checkout not found. Please contact support."
+      });
+    }
+
+    // Idempotency: do not create the order twice.
+    if (checkout.status === "completed") {
+      return res.json({
+        success: true,
+        orderName: checkout.orderName,
+        shopifyOrderId: checkout.shopifyOrderId,
+        financialStatus: "PAID",
+        statusPageUrl: checkout.statusPageUrl
+      });
+    }
+
+    if (checkout.razorpayOrderId !== razorpay_order_id) {
+      return res.status(400).json({
+        success: false,
+        message: "Razorpay order ID mismatch"
+      });
+    }
+
+    // Verify Razorpay signature.
+    if (
+      !verifySignature(
+        razorpay_order_id,
+        razorpay_payment_id,
+        razorpay_signature
+      )
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid payment signature"
+      });
+    }
+
+    if (
+      checkout.status === "processing" &&
+      Date.now() - checkout.processingAt < 120000
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "Payment verification is already processing"
+      });
+    }
+
+    checkout.status = "processing";
+    checkout.processingAt = Date.now();
+    checkout.paymentId = razorpay_payment_id;
+
+    // Independently verify payment with Razorpay.
+    const payment = await razorpay.payments.fetch(
+      razorpay_payment_id
+    );
+
+    if (
+      payment.order_id !== checkout.razorpayOrderId ||
+      Number(payment.amount) !== checkout.amount ||
+      payment.currency !== checkout.currency
+    ) {
+      checkout.status = "failed";
+
+      return res.status(400).json({
+        success: false,
+        message: "Payment details do not match the checkout"
+      });
+    }
+
+    // Capture an authorized payment.
+    let verifiedPayment = payment;
+
+    if (payment.status === "authorized") {
+      verifiedPayment = await razorpay.payments.capture(
+        razorpay_payment_id,
+        checkout.amount,
+        checkout.currency
+      );
+    }
+
+    if (verifiedPayment.status !== "captured") {
+      checkout.status = "failed";
+
+      return res.status(400).json({
+        success: false,
+        message: "Payment has not been captured"
+      });
+    }
+
+    // Payment is captured. Now create the Shopify order.
+    checkout.status = "paid_pending_shopify";
+
+    const shopifyOrder = await createShopifyOrder(checkout);
+
+    checkout.status = "completed";
+    checkout.shopifyOrderId = shopifyOrder.id;
+    checkout.orderName = shopifyOrder.name;
+    checkout.statusPageUrl = shopifyOrder.statusPageUrl;
+
+    return res.json({
+      success: true,
+      orderName: shopifyOrder.name,
+      shopifyOrderId: shopifyOrder.id,
+      financialStatus: shopifyOrder.displayFinancialStatus,
+      statusPageUrl: shopifyOrder.statusPageUrl
+    });
+
+  } catch (error) {
+    console.error("Payment verification error:", error);
+
+    if (checkout && checkout.paymentId) {
+      checkout.status = "paid_pending_shopify";
+
+      return res.status(502).json({
+        success: false,
+        paymentCaptured: true,
+        message:
+          "Payment was received, but Shopify order creation failed. Please contact support. Do not pay again."
+      });
+    }
+
+    if (checkout) {
+      checkout.status = "failed";
+    }
+
+    return res.status(500).json({
+      success: false,
+      message: error.message || "Payment verification failed"
+    });
+  }
+});
+
+// --------------------------------------------------
+// PAYMENT FAILURE CALLBACK
+// POST /api/payments/failure
+// --------------------------------------------------
+
+app.post("/api/payments/failure", (req, res) => {
+  const { checkoutId, error } = req.body;
+
+  const checkout = checkouts.get(checkoutId);
+
+  if (!checkout) {
+    return res.status(404).json({
+      success: false,
+      message: "Checkout not found"
+    });
+  }
+
+  // Never mark an already paid checkout as failed.
+  if (
+    checkout.status !== "completed" &&
+    checkout.status !== "paid_pending_shopify" &&
+    checkout.status !== "processing"
+  ) {
+    checkout.status = "failed";
+    checkout.failure = error || null;
+  }
+
+  return res.json({
+    success: true,
+    message: "Payment failure recorded"
+  });
+});
+
 
 
 
