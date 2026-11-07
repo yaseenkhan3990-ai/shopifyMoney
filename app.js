@@ -18,14 +18,7 @@ const allowedOrigins = (process.env.FRONTEND_URL || "")
     .map(x => x.trim())
     .filter(Boolean);
 
-app.use(cors({
-    origin(origin, callback) {
-        if (!origin || allowedOrigins.includes(origin)) {
-            return callback(null, true);
-        }
-        callback(new Error("Origin not allowed"));
-    }
-}));
+
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
@@ -370,13 +363,13 @@ setInterval(() => {
 async function shopifyGraphQL(query, variables = {}) {
 
     const response = await fetch(
-        `https://${process.env.SHOPIFY_STORE_DOMAIN}/admin/api/${process.env.SHOPIFY_API_VERSION}/graphql.json`,
+        `https://${process.env.SHOPIFY_STORE}/admin/api/2025-10/graphql.json`,
         {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
                 "X-Shopify-Access-Token":
-                    process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+                    process.env.SSHOPIFY_ADMIN_TOKEN
             },
             body: JSON.stringify({
                 query,
@@ -577,13 +570,14 @@ async function createShopifyOrder(checkout) {
 // POST /api/payments/create-order
 // ================================
 
+
 app.post("/api/payments/create-order", async (req, res) => {
 
     try {
 
         const { shop, customer, items } = req.body;
 
-        if (shop !== process.env.SHOPIFY_STORE_DOMAIN) {
+        if (shop !== process.env.SHOPIFY_STORE) {
             return res.status(403).json({
                 message: "Invalid store"
             });
