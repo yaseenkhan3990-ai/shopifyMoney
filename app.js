@@ -5,8 +5,7 @@ import Wallet from './schema/wallet.js';
 import Order from './schema/order.js';
 import cors from 'cors';
 import Razorpay from 'razorpay';
-
-
+import crypto from "crypto";
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.use(cors({ origin: 'https://sitara-style-2.myshopify.com' }));
@@ -14,6 +13,19 @@ app.use(cors({ origin: 'https://sitara-style-2.myshopify.com' }));
 
 app.use(express.json());
 app.use(express.urlencoded({extended:true}));
+const allowedOrigins = (process.env.FRONTEND_URL || "")
+    .split(",")
+    .map(x => x.trim())
+    .filter(Boolean);
+
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin || allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+        callback(new Error("Origin not allowed"));
+    }
+}));
 
 const normalizeEmail = (email) => String(email || '').trim().toLowerCase();
 
