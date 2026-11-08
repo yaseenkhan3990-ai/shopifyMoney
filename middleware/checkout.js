@@ -38,7 +38,7 @@ const verifyPaymentSignature = (orderId, paymentId, signature) => {
 };
 
 const shopifyGraphQL = async (query, variables = {}) => {
-  const domain = process.env.SHOPIFY_STORE_DOMAIN;
+  const domain = process.env.SHOPIFY_STORE;
   const version = process.env.SHOPIFY_API_VERSION || '2026-10';
 
   const response = await fetch(
@@ -47,7 +47,7 @@ const shopifyGraphQL = async (query, variables = {}) => {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_ACCESS_TOKEN
+        'X-Shopify-Access-Token': process.env.SHOPIFY_ADMIN_TOKEN
       },
       body: JSON.stringify({ query, variables })
     }
