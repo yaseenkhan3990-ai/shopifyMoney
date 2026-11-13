@@ -77,10 +77,12 @@ router.get('/', (req, res) => {
 router.post('/create-order', async (req, res) => {
   try {
     const {
+      shop,
       customer,
       shipping_address,
       cart_items,
-      total
+      total,
+      cart_total
     } = req.body || {};
     const email = normalizeEmail(customer?.email);
 
@@ -129,7 +131,7 @@ router.post('/create-order', async (req, res) => {
       });
     }
 
-    const parsedTotal = parsePositiveAmount(total);
+    const parsedTotal = parsePositiveAmount(total ?? cart_total);
 
     if (!parsedTotal) {
       return res.status(400).json({
@@ -157,6 +159,13 @@ router.post('/create-order', async (req, res) => {
 
     paymentSessions.set(checkoutId, {
       checkoutId,
+      shop: String(shop || process.env.SHOPIFY_STORE || '').trim(),
+      customer: {
+        email,
+        firstName: String(customer?.firstName || '').trim(),
+        lastName: String(customer?.lastName || '').trim(),
+        phone: String(customer?.phone || '').trim()
+      },
       email,
       shipping_address,
       line_items,
@@ -306,8 +315,12 @@ router.post('/verify-payment', async (req, res) => {
     const nameParts = String(session.shipping_address.name || '')
       .trim()
       .split(/\s+/);
-    const firstName = nameParts.shift() || '';
-    const lastName = nameParts.join(' ');
+    const shippingFirstName = nameParts.shift() || '';
+    const shippingLastName = nameParts.join(' ');
+    const firstName = session.customer.firstName || shippingFirstName;
+    const lastName = session.customer.lastName || shippingLastName;
+    const country = String(session.shipping_address.country || 'India').trim();
+    const countryCode = country.toLowerCase() === 'india' ? 'IN' : undefined;
     const orderInput = {
       email: session.email,
       lineItems: session.line_items.map(item => ({
@@ -320,10 +333,16 @@ router.post('/verify-payment', async (req, res) => {
         address1: session.shipping_address.address,
         city: session.shipping_address.city,
         zip: session.shipping_address.pincode,
-        phone: session.shipping_address.phone,
-        countryCode: 'IN'
+        phone: session.shipping_address.phone || session.customer.phone,
+        province: session.shipping_address.province || undefined,
+        country,
+        ...(countryCode ? { countryCode } : {})
       },
-      note: `Razorpay Payment ID: ${razorpay_payment_id}\nCheckout ID: ${checkoutId}`,
+      note: [
+        `Razorpay Payment ID: ${razorpay_payment_id}`,
+        `Checkout ID: ${checkoutId}`,
+        session.shop ? `Shop: ${session.shop}` : ''
+      ].filter(Boolean).join('\n'),
       tags: ['Razorpay', 'Online Payment', `checkout-${checkoutId}`],
       financialStatus: 'PAID',
       transactions: [{
@@ -331,7 +350,7 @@ router.post('/verify-payment', async (req, res) => {
         status: 'SUCCESS',
         amountSet: {
           shopMoney: {
-            amount: session.total.toFixed(2)*100,
+            amount: session.total.toFixed(2),
             currencyCode: 'INR'
           }
         }
