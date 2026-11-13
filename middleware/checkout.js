@@ -331,7 +331,7 @@ router.post('/verify-payment', async (req, res) => {
         status: 'SUCCESS',
         amountSet: {
           shopMoney: {
-            amount: session.total.toFixed(2),
+            amount: session.total.toFixed(2)*100,
             currencyCode: 'INR'
           }
         }
